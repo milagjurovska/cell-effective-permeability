@@ -81,7 +81,6 @@ class Caco2CSVData(InMemoryDataset):
         super().__init__(root=os.path.dirname(csv_path) or '.')
         processed = self.processed_paths[0]
         if os.path.exists(processed):
-            # Fix: Set weights_only=False for PyTorch Geometric data
             self.data, self.slices = torch.load(processed, weights_only=False)
         else:
             self.process()
@@ -140,31 +139,37 @@ class Caco2CSVData(InMemoryDataset):
         data, slices = self.collate(data_list)
         torch.save((data, slices), self.processed_paths[0])
 
-# ---------- model ----------
 class GCNRegressor(nn.Module):
-    def __init__(self, in_dim: int, desc_dim: int, hidden: int = 128, num_layers: int = 3, dropout: float = 0.1):
+    def __init__(self, in_dim, hidden_dim, desc_dim, dropout=0.2):
         super().__init__()
-        self.convs = nn.ModuleList()
-        last = in_dim
-        for _ in range(num_layers):
-            self.convs.append(GCNConv(last, hidden))
-            last = hidden
+        self.conv1 = GCNConv(in_dim, hidden_dim)
+        self.conv2 = GCNConv(hidden_dim, hidden_dim)
+
         self.dropout = nn.Dropout(dropout)
+
         self.head = nn.Sequential(
-            nn.Linear(hidden + desc_dim, 128), nn.ReLU(), nn.Dropout(dropout),
-            nn.Linear(128, 64), nn.ReLU(), nn.Dropout(dropout),
-            nn.Linear(64, 1)
+            nn.Linear(hidden_dim + desc_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
         )
 
     def forward(self, data: Data):
         x, edge_index, batch = data.x, data.edge_index, data.batch
-        for conv in self.convs:
-            x = conv(x, edge_index)
-            x = torch.relu(x)
-            x = self.dropout(x)
+
+        x = self.conv1(x, edge_index).relu()
+        x = self.conv2(x, edge_index).relu()
+        x = self.dropout(x)
+
         g = global_mean_pool(x, batch)
-        out = torch.cat([g, data.desc], dim=-1)
+        desc = data.desc
+        batch_size = g.size(0)
+        desc_dim = desc.size(0) // batch_size
+
+        desc = desc.view(batch_size, desc_dim)
+
+        out = torch.cat([g, desc], dim=-1)
         return self.head(out).squeeze(-1)
+
 
 class MLPRegressor(nn.Module):
     def __init__(self, desc_dim: int, hidden: int = 256, dropout: float = 0.1):
@@ -204,7 +209,14 @@ def train(csv_path: str, target_col: str = 'target', use_graph: bool = True,
     in_dim = ds[0].x.shape[1] if use_graph else 0
     desc_dim = len(DESC_COLS)
 
-    model = GCNRegressor(in_dim=in_dim, desc_dim=desc_dim) if use_graph else MLPRegressor(desc_dim=desc_dim)
+    hidden_dim = 128  # or 64 if you want smaller
+
+    model = (
+        GCNRegressor(in_dim=in_dim, hidden_dim=hidden_dim, desc_dim=desc_dim)
+        if use_graph
+        else MLPRegressor(desc_dim=desc_dim)
+    )
+
     model.to(device)
     optim = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
@@ -235,7 +247,9 @@ def train(csv_path: str, target_col: str = 'target', use_graph: bool = True,
 
         if val_rmse < best_rmse:
             best_rmse = val_rmse
-            torch.save({'model_state': model.state_dict(), 'use_graph': use_graph, 'in_dim': in_dim, 'desc_dim': desc_dim}, best_path)
+            torch.save(
+                {'model_state': model.state_dict(), 'use_graph': use_graph, 'in_dim': in_dim, 'desc_dim': desc_dim,
+                 'hidden_dim': hidden_dim}, best_path)
             patience = 20
         else:
             patience -= 1
@@ -270,12 +284,14 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> Tupl
     return mae, rmse, r2
 
 
-def predict(csv_path: str, checkpoint: str, out_csv: str = 'preds.csv', batch_size: int = 256, device: Optional[str] = None):
-    # Fix: Set weights_only=False for model checkpoint loading
+
+def predict(csv_path: str, checkpoint: str, out_csv: str = 'preds.csv', batch_size: int = 256,
+            device: Optional[str] = None):
     ckpt = torch.load(checkpoint, map_location='cpu', weights_only=False)
     use_graph = ckpt.get('use_graph', True)
     in_dim = ckpt.get('in_dim', None)
     desc_dim = ckpt.get('desc_dim', len(DESC_COLS))
+    hidden_dim = ckpt.get('hidden_dim', 128)
 
     df = pd.read_csv(csv_path)
     for c in ['smiles'] + DESC_COLS:
@@ -289,12 +305,12 @@ def predict(csv_path: str, checkpoint: str, out_csv: str = 'preds.csv', batch_si
         if use_graph:
             g = mol_to_graph(smiles)
             if g is None:
-                g = Data(x=torch.zeros((1, in_dim if in_dim else 1)), edge_index=torch.empty((2,0), dtype=torch.long))
+                g = Data(x=torch.zeros((1, in_dim if in_dim else 1)), edge_index=torch.empty((2, 0), dtype=torch.long))
             g.desc = desc
             g.smiles = smiles
             samples.append(g)
         else:
-            n = Data(x=torch.zeros((1,1)), edge_index=torch.empty((2,0), dtype=torch.long))
+            n = Data(x=torch.zeros((1, 1)), edge_index=torch.empty((2, 0), dtype=torch.long))
             n.desc = desc
             n.smiles = smiles
             samples.append(n)
@@ -302,7 +318,9 @@ def predict(csv_path: str, checkpoint: str, out_csv: str = 'preds.csv', batch_si
     loader = DataLoader(samples, batch_size=batch_size)
     device = torch.device(device if device else ('cuda' if torch.cuda.is_available() else 'cpu'))
 
-    model = GCNRegressor(in_dim=in_dim if in_dim else 1, desc_dim=desc_dim) if use_graph else MLPRegressor(desc_dim=desc_dim)
+    model = GCNRegressor(in_dim=in_dim if in_dim else 1, hidden_dim=hidden_dim,
+                         desc_dim=desc_dim) if use_graph else MLPRegressor(desc_dim=desc_dim)
+
     model.load_state_dict(ckpt['model_state'])
     model.to(device)
     model.eval()
