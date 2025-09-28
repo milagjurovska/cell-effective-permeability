@@ -1,0 +1,16 @@
+{
+  "model_head": {
+    "in_dim": 58,
+    "hidden_dim": 128,
+    "dropout": 0.2
+  },
+  "predictor": {
+    "pred_input_channels": 128,
+    "desc_dim": 7,
+    "hidden_dim": 128,
+    "dropout": 0.2
+  },
+  "model_head_path": null,
+  "predictor_path": null,
+  "freeze_head": false
+}

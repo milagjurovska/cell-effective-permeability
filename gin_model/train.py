@@ -10,17 +10,16 @@ from torch import nn
 from torch.utils.data import random_split
 from torch_geometric.loader import DataLoader
 
-from gcn_model.configs.base_config import BaseConfig
-from gcn_model.configs.model_config import ModelConfig, GraphStackConfig, PredictorConfig
-from gcn_model.data import Caco2CSVData, DESC_COLS
-from gcn_model.model import Model
-from gcn_model.models.graph_stack import GraphStack
-from gcn_model.models.predictor import Predictor
+from gin_model.configs.base_config import BaseConfig
+from gin_model.configs.model_config import ModelConfig, GraphStackConfig, PredictorConfig
+from gin_model.data import Caco2CSVData, DESC_COLS
+from gin_model.model import Model
+from gin_model.models.gin_stack import GINStack
+from gin_model.models.predictor import Predictor
 
 
 def seed_everything(seed: int = 42):
     import random
-    import numpy as np
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -56,9 +55,11 @@ def build_model_from_sample(sample, hidden_dim: int = 128, dropout: float = 0.2)
     p_cfg = PredictorConfig(pred_input_channels=hidden_dim, desc_dim=len(DESC_COLS), hidden_dim=hidden_dim, dropout=dropout)
     m_cfg = ModelConfig(model_head=g_cfg, predictor=p_cfg, freeze_head=False)
 
-    model_head = GraphStack(in_dim=g_cfg.in_dim, hidden_dim=g_cfg.hidden_dim, dropout=g_cfg.dropout)
+    model_head = GINStack(in_dim=g_cfg.in_dim, hidden_dim=g_cfg.hidden_dim, dropout=g_cfg.dropout)
     predictor = Predictor.from_config(p_cfg)
     return Model(model_head=model_head, prediction_head=predictor), m_cfg
+
+
 def train(
     csv_path: str,
     target_col: str = 'target',
@@ -69,13 +70,16 @@ def train(
     val_split: float = 0.2,
     device: Optional[str] = None,
     save_dir: str = 'runs',
-    experiment_name: str = 'gcn_with_desc',
-    registry_root: str = 'best_gcn_models',
+    experiment_name: str = 'gin_with_desc',
+    registry_root: str = 'best_gin_models',
     registry_tag: Optional[str] = None,
     score_name: str = 'rmse',
+    hidden_dim: int = 128,
+    dropout: float = 0.2,
 ) -> str:
     seed_everything()
     ds = Caco2CSVData(csv_path, target_col=target_col, use_graph=True)
+
     n = len(ds)
     n_val = max(1, int(n * val_split))
     n_train = n - n_val
@@ -84,13 +88,12 @@ def train(
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size)
 
-    # 2) device & model.py
     device = torch.device(device if device else ('cuda' if torch.cuda.is_available() else 'cpu'))
-    model, model_cfg = build_model_from_sample(ds[0])
+
+    model, model_cfg = build_model_from_sample(ds[0], hidden_dim=hidden_dim, dropout=dropout)
     model.to(device)
     optim = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
-    # 3) experiment dir
     exp_dir = BaseConfig.get_model_folder(experiment_name=experiment_name, model_root=save_dir)
     os.makedirs(exp_dir, exist_ok=True)
 
@@ -121,7 +124,6 @@ def train(
         if val_rmse < best_rmse:
             best_rmse = val_rmse
             best_metrics = {"mae": val_mae, "rmse": val_rmse, "r2": val_r2}
-            # save best weights + config
             model.save(exp_dir)
             with open(os.path.join(exp_dir, 'config.json'), 'w') as f:
                 json.dump(asdict(model_cfg), f, indent=2)
@@ -129,7 +131,7 @@ def train(
         else:
             patience -= 1
             if patience <= 0:
-                print("Early stopping")
+                print('Early stopping')
                 break
 
     print(f"Best model saved to {exp_dir}")
@@ -156,14 +158,16 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument('--csv', required=True)
     ap.add_argument('--target', default='target')
-    ap.add_argument('--experiment', default='gcn_with_desc')
+    ap.add_argument('--experiment', default='gin_with_desc')
     ap.add_argument('--epochs', type=int, default=100)
     ap.add_argument('--runs_root', default='runs')
-    ap.add_argument('--registry_root', default='best_gcn_models')
+    ap.add_argument('--registry_root', default='best_gin_models')
     ap.add_argument('--registry_tag', default=None)
     ap.add_argument('--batch_size', type=int, default=64)
     ap.add_argument('--lr', type=float, default=1e-3)
     ap.add_argument('--weight_decay', type=float, default=1e-5)
+    ap.add_argument('--hidden_dim', type=int, default=128)
+    ap.add_argument('--dropout', type=float, default=0.2)
     args = ap.parse_args()
 
     train(
@@ -177,5 +181,6 @@ if __name__ == "__main__":
         experiment_name=args.experiment,
         registry_root=args.registry_root,
         registry_tag=args.registry_tag,
+        hidden_dim=args.hidden_dim,
+        dropout=args.dropout,
     )
-
