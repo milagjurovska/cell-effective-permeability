@@ -1,8 +1,0 @@
-{
-  "tag": "gcn_desc_h128_d02",
-  "score_name": "rmse",
-  "score_value": 0.5696112513542175,
-  "source_run_dir": "C:\\Users\\milam\\PycharmProjects\\MANU\\runs\\gcn_desc_h128_d02",
-  "registry_dir": "C:\\Users\\milam\\PycharmProjects\\MANU\\best_gcn_models\\gcn_desc_h128_d02-rmse0.5696-20250928-150937",
-  "timestamp": "20250928-150937"
-}
