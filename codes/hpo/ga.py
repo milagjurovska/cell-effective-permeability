@@ -34,16 +34,8 @@ def main():
         model_name=args.model, best=best, epochs=args.epochs, patience=args.patience,
         csv=args.csv, target=args.target, batch_size=args.batch_size, seed=args.seed,
         out_dir=args.run_dir, algo_name=algo_name, fold=args.fold,
-        best_val_rmse_from_search=float(best_f),
+        best_val_rmse_from_search=float(best_f), trials=args.trials,
     )
-
-    import json
-    with open(out_path, "r", encoding="utf-8") as f:
-        payload = json.load(f)
-    payload["search"]["trials"] = int(args.trials)
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-
     print(f"[HPO] Single-file summary saved → {out_path}")
 
 if __name__ == "__main__":
